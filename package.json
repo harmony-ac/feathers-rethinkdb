@@ -53,7 +53,7 @@
   },
   "devDependencies": {
     "@feathersjs/express": "^1.2.7",
-    "@feathersjs/feathers": "^3.2.3",
+    "@feathersjs/feathers": "^4.3.0",
     "@feathersjs/socketio": "^3.2.6",
     "body-parser": "^1.18.3",
     "chai": "^4.2.0",
