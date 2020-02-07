@@ -27,7 +27,7 @@
     "node": ">= 6"
   },
   "scripts": {
-    "prepublish": "tsc",
+    "build": "tsc",
     "publish": "git push origin --tags && npm run changelog && git push origin",
     "changelog": "github_changelog_generator && git add CHANGELOG.md && git commit -am \"Updating changelog\"",
     "release:patch": "npm version patch && npm publish",
