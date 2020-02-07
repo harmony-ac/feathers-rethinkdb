@@ -1,5 +1,5 @@
 import { R, RDatum } from 'rethinkdb-ts/lib/types'
-import { _ } from '@feathersjs/commons'
+import { _ } from '@feathersjs/commons/lib'
 
 // Special parameter to RQL condition
 const mappings: { [key: string]: string | undefined } = {
@@ -42,6 +42,7 @@ export function createFilter<T> (query: any, r: R): (doc: any) => RDatum<any> {
       } else {
         // Handle special parameters
         _.each(value, (selector, type) => {
+          let method
           if (type === '$in') {
             matcher = matcher.and(
               r.expr(selector).contains(buildNestedQueryPredicate(field, doc))
@@ -53,11 +54,10 @@ export function createFilter<T> (query: any, r: R): (doc: any) => RDatum<any> {
                 .contains(buildNestedQueryPredicate(field, doc))
                 .not()
             )
-          } else if (mappings[type]) {
+          } else if ((method = mappings[type])) {
             const selectorArray = Array.isArray(selector)
               ? selector
               : [selector]
-            const method = mappings[type]
 
             matcher = matcher.and(
               buildNestedQueryPredicate(field, doc)[method](...selectorArray)
@@ -71,7 +71,7 @@ export function createFilter<T> (query: any, r: R): (doc: any) => RDatum<any> {
   }
 }
 
-function buildNestedQueryPredicate (field, doc) {
+function buildNestedQueryPredicate (field: string, doc: any) {
   var fields = field.split('.')
   var searchFunction = doc(fields[0])
 

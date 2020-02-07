@@ -1,50 +1,69 @@
-import Proto from 'uberproto'
-import { R, RTable, RValue, RQuery } from 'rethinkdb-ts/lib/types'
 import {
+  R,
+  RTable,
+  RValue,
+  RDatum,
+  RQuery,
+  InsertOptions,
+  UpdateOptions,
+  DeleteOptions,
+  RCursor,
+  Changes
+} from 'rethinkdb-ts/lib/types'
+import {
+  Id,
+  NullableId,
   ServiceMethods,
-  Params,
+  Params as DefaultParams,
   PaginationOptions,
-  Query
+  Query,
+  Application
 } from '@feathersjs/feathers'
-import { _, select, hooks, filterQuery } from '@feathersjs/commons'
+import { _, hooks } from '@feathersjs/commons'
+import {
+  AdapterService,
+  select,
+  ServiceOptions,
+  InternalServiceMethods,
+  filterQuery
+} from '@feathersjs/adapter-commons'
 import errors from '@feathersjs/errors'
-
-declare module '@feathersjs/feathers' {
-  interface Params {
-    rethinkdb?: RQuery
-  }
-}
-
 import { createFilter } from './parse'
+import { EventEmitter } from 'events'
+import { DeepPartial } from 'rethinkdb-ts/lib/internal-types'
+
+//declare module '@feathersjs/feathers' {
+interface Params extends DefaultParams {
+  paginate?: false | PaginationOptions
+}
+//}
 
 const { processHooks, getHooks, createHookObject } = hooks
 const BASE_EVENTS = ['created', 'updated', 'patched', 'removed']
 
-interface Options {
-  r: R
+interface Options extends ServiceOptions {
+  Model: R
   db: string
   name: string
-  id?: string
   watch?: boolean
-  paginate?: {}
-  events?: string[]
+  events: string[]
+  paginate: false | PaginationOptions
 }
 
 // Create the service.
-class Service<A> implements ServiceMethods<A> {
+class Service<A> extends AdapterService<A> implements InternalServiceMethods {
   type: 'rethinkdb'
-  id: string
-  table: RTable
-  options: Options
+  table: RTable<A>
   watch: boolean
-  paginate: {}
-  events: string[]
+  options: Options
+  paginate: false | PaginationOptions
+  _cursor: any
   constructor (options: Options) {
     if (!options) {
       throw new Error('RethinkDB options have to be provided.')
     }
 
-    if (!options.r) {
+    if (!options.Model) {
       throw new Error('You must provide the RethinkDB object on options.Model')
     }
 
@@ -55,24 +74,31 @@ class Service<A> implements ServiceMethods<A> {
     if (!options.name) {
       throw new Error('You must provide a table name on options.name')
     }
+    if (options.watch) {
+      options.events = BASE_EVENTS.concat(options.events ?? [])
+    }
+    super({ id: '_id', ...options })
+    this.options = Object.assign(
+      // we need to do this again, just for correct typings
+      {
+        id: 'id',
+        events: [],
+        paginate: {},
+        multi: false,
+        filters: [],
+        whitelist: []
+      },
+      options
+    )
 
     this.type = 'rethinkdb'
-    this.id = options.id || 'id'
-    this.table = options.r.db(options.db).table(options.name)
-    this.options = options
+    this.table = options.Model.db(options.db).table(options.name)
     this.watch = options.watch ?? true
-    this.paginate = options.paginate ?? {}
-    this.events = this.watch
-      ? BASE_EVENTS.concat(options.events ?? [])
-      : options.events ?? []
-  }
-
-  extend (obj: any) {
-    return Proto.extend(obj, this)
+    this.paginate = options.paginate
   }
 
   async init (opts = {}) {
-    let r = this.options.r
+    let r = this.options.Model
     let t = this.options.name
     let db = this.options.db
 
@@ -93,19 +119,28 @@ class Service<A> implements ServiceMethods<A> {
       .run()
   }
 
-  createFilter (query) {
-    return createFilter(query, this.options.r)
+  createFilter (query: any) {
+    return createFilter(query, this.options.Model)
   }
 
-  createQuery (originalQuery) {
-    const { filters, query } = filterQuery(originalQuery || {})
+  createQuery (q: any) {
+    let r = this.options.Model
 
-    let r = this.options.r
-    let rq = this.table.filter(this.createFilter(query))
+    const { filters, query } = filterQuery(q || {}, { operators: ['$or'] })
+
+    let rfilter: any
+    if (query.$or) {
+      const branches = filters.$or.map((b: any) => this.createFilter(b))
+      if (branches.length == 0) rfilter = {}
+      else rfilter = r.or(...(branches as [any, any]))
+    } else {
+      rfilter = this.createFilter(query)
+    }
+    let rq = this.table.filter(rfilter)
 
     // Handle $select
     if (filters.$select) {
-      rq = rq.pluck(filters.$select)
+      rq = rq.pluck(filters.$select) as any
     }
 
     // Handle $sort
@@ -122,17 +157,16 @@ class Service<A> implements ServiceMethods<A> {
     return rq
   }
 
-  _find (params: Params = {}) {
-    const paginate =
-      typeof params.paginate !== 'undefined' ? params.paginate : this.paginate
+  _find (params: Params & { rethinkdb?: RTable<A> } = {}) {
+    const paginate = params.paginate || this.paginate
     // Prepare the special query params.
     const { filters } = filterQuery(params.query || {}, paginate)
 
-    let q = params.rethinkdb || this.createQuery(params.query)
+    let q = params.rethinkdb ?? this.createQuery(params.query)
     let countQuery
 
     // For pagination, count has to run as a separate query, but without limit.
-    if (paginate.default) {
+    if (paginate && paginate.default) {
       countQuery = q.count().run()
     }
 
@@ -147,7 +181,7 @@ class Service<A> implements ServiceMethods<A> {
 
     // Execute the query
     return Promise.all([q, countQuery]).then(([data, total]) => {
-      if (paginate.default) {
+      if (paginate && paginate.default) {
         return {
           total,
           data,
@@ -160,38 +194,28 @@ class Service<A> implements ServiceMethods<A> {
     })
   }
 
-  find (...args) {
-    return this._find(...args)
-  }
-
-  _get (id, params = {}) {
+  _get (id: Id, params: Params & { query?: any } = {}) {
     let query = this.table.filter(params.query).limit(1)
 
     // If an id was passed, just get the record.
     if (id !== null && id !== undefined) {
-      query = this.table.get(id)
+      query = this.table.get(id) as any
     }
 
     if (params.query && params.query.$select) {
-      query = query.pluck(params.query.$select.concat(this.id))
+      query = query.pluck(params.query.$select.concat(this.id)) as any
     }
 
     return query.run().then(data => {
-      if (Array.isArray(data)) {
-        data = data[0]
-      }
-      if (!data) {
+      const result = Array.isArray(data) ? data[0] : data
+      if (!result) {
         throw new errors.NotFound(`No record found for id '${id}'`)
       }
-      return data
+      return result
     })
   }
 
-  get (...args) {
-    return this._get(...args)
-  }
-
-  create (data, params = {}) {
+  _create (data: any, params: Params & { rethinkdb?: InsertOptions } = {}) {
     const idField = this.id
     return this.table
       .insert(data, params.rethinkdb)
@@ -206,7 +230,7 @@ class Service<A> implements ServiceMethods<A> {
           return data
         } else {
           // add generated id
-          const addId = (current, index) => {
+          const addId = (current: any, index: number) => {
             if (res.generated_keys && res.generated_keys[index]) {
               return Object.assign({}, current, {
                 [idField]: res.generated_keys[index]
@@ -226,20 +250,24 @@ class Service<A> implements ServiceMethods<A> {
       .then(select(params, this.id))
   }
 
-  patch (id, data, params = {}) {
-    let query
+  _patch (
+    id: Id,
+    data: any,
+    params: Params & { rethinkdb?: UpdateOptions } = {}
+  ) {
+    let query: any
 
     if (id !== null && id !== undefined) {
       query = this._get(id)
     } else if (params) {
-      query = this._find(params)
+      query = this._find({ ...params, rethinkdb: undefined })
     } else {
       return Promise.reject(new Error('Patch requires an ID or params'))
     }
 
     // Find the original record(s), first, then patch them.
     return query
-      .then(getData => {
+      .then((getData: any) => {
         let query
         let options = Object.assign({ returnChanges: true }, params.rethinkdb)
 
@@ -253,14 +281,14 @@ class Service<A> implements ServiceMethods<A> {
           .update(data, options)
           .run()
           .then(response => {
-            let changes = response.changes.map(change => change.new_val)
+            let changes = (response.changes ?? []).map(change => change.new_val)
             return changes.length === 1 ? changes[0] : changes
           })
       })
       .then(select(params, this.id))
   }
 
-  update (id, data, params = {}) {
+  _update (id: Id, data: any, params: { rethinkdb?: UpdateOptions } = {}) {
     let options = Object.assign({ returnChanges: true }, params.rethinkdb)
 
     if (Array.isArray(data) || id === null) {
@@ -272,7 +300,7 @@ class Service<A> implements ServiceMethods<A> {
     }
 
     return this._get(id, params)
-      .then(getData => {
+      .then((getData: any) => {
         data[this.id] = id
         return this.table
           .get(getData[this.id])
@@ -287,7 +315,7 @@ class Service<A> implements ServiceMethods<A> {
       .then(select(params, this.id))
   }
 
-  remove (id: string, params = {}) {
+  _remove (id: string, params: Params & { rethinkdb?: DeleteOptions } = {}) {
     let query
     let options = Object.assign({ returnChanges: true }, params.rethinkdb)
 
@@ -316,17 +344,17 @@ class Service<A> implements ServiceMethods<A> {
       .then(select(params, this.id))
   }
 
-  watchChangefeeds (app) {
+  watchChangefeeds (this: Service<A> & EventEmitter, app: Application) {
     if (!this.watch || this._cursor) {
       return this._cursor
     }
 
-    let runHooks = (method, data) =>
+    let runHooks = (method: string, data: any) =>
       Promise.resolve({
         result: data
       })
 
-    if (this.__hooks) {
+    if ((this as any).__hooks) {
       // If the hooks plugin is enabled
       // This is necessary because the data coming directly from the
       // change feeds does not run through `after` hooks by default
@@ -338,6 +366,10 @@ class Service<A> implements ServiceMethods<A> {
           app,
           service,
           result: data,
+          id:
+            method === 'update' || method === 'patch' || method === 'remove'
+              ? data[this.id]
+              : undefined,
           type: 'after',
           get path () {
             return Object.keys(app.services).find(
@@ -346,17 +378,7 @@ class Service<A> implements ServiceMethods<A> {
           }
         }
 
-        // Add `data` to arguments
-        if (method === 'create' || method === 'update' || method === 'patch') {
-          args.unshift(data)
-        }
-
-        // `id` for update, patch and remove
-        if (method === 'update' || method === 'patch' || method === 'remove') {
-          args.unshift(data[this.id])
-        }
-
-        const hookObject = createHookObject(method, args, hookData)
+        const hookObject = createHookObject(method, hookData)
         const hookChain = getHooks(app, this, 'after', method)
 
         return processHooks.call(this, hookChain, hookObject)
@@ -366,7 +388,7 @@ class Service<A> implements ServiceMethods<A> {
     this._cursor = this.table
       .changes()
       .run()
-      .then(cursor => {
+      .then((cursor: RCursor<Changes<any>>) => {
         cursor.each((error, data) => {
           if (error || typeof this.emit !== 'function') {
             return
@@ -395,14 +417,14 @@ class Service<A> implements ServiceMethods<A> {
     return this._cursor
   }
 
-  setup (app) {
+  setup (this: Service<A> & EventEmitter, app: Application) {
     const rethinkInit = app.get('rethinkInit') || Promise.resolve()
 
     rethinkInit.then(() => this.watchChangefeeds(app))
   }
 }
 
-module.exports = function (options) {
+module.exports = function (options: Options) {
   return new Service(options)
 }
 
