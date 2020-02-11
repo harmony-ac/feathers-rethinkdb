@@ -118,7 +118,6 @@ const app = feathers()
         db: 'feathers',
         name: 'people',
         watch: true,
-        multi: true,
         events: ['testing']
       }),
       numberService
@@ -133,7 +132,6 @@ const app = feathers()
         db: 'feathers',
         name: 'people_customid',
         watch: true,
-        multi: true,
         events: ['testing']
       }),
       numberService
@@ -169,17 +167,13 @@ describe('feathers-rethinkdb', () => {
 
   after(() => {
     return Promise.all([
-      r.table('people').delete(null),
-      r.table('people_customid').delete(null)
+      r.table('people').delete(null, {}),
+      r.table('people_customid').delete(null, {})
     ])
   })
 
   it('is CommonJS compatible', () => {
     expect(typeof require('../lib')).to.equal('function')
-  })
-
-  it('basic functionality', () => {
-    expect(typeof 1).to.equal('number')
   })
 
   it('after hooks run and get send with events', done => {
@@ -288,7 +282,7 @@ describe('feathers-rethinkdb', () => {
     })
 
     it('create allows upsert with params.rethinkdb options', () => {
-      people
+      return people
         .create({ name: 'Testing upser' })
         .then(result => {
           const rethinkdb = { conflict: 'update' }

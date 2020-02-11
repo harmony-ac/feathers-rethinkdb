@@ -8,7 +8,9 @@ import {
   UpdateOptions,
   DeleteOptions,
   RCursor,
-  Changes
+  Changes,
+  RSelection,
+  RSingleSelection
 } from 'rethinkdb-ts/lib/types'
 import {
   Id,
@@ -17,7 +19,8 @@ import {
   Params as DefaultParams,
   PaginationOptions,
   Query,
-  Application
+  Application,
+  Paginated
 } from '@feathersjs/feathers'
 import { _, hooks } from '@feathersjs/commons'
 import {
@@ -28,7 +31,6 @@ import {
   filterQuery
 } from '@feathersjs/adapter-commons'
 import errors from '@feathersjs/errors'
-import { createFilter } from './parse'
 import { EventEmitter } from 'events'
 import { DeepPartial } from 'rethinkdb-ts/lib/internal-types'
 
@@ -97,6 +99,13 @@ class Service<A> extends AdapterService<A> implements InternalServiceMethods {
     this.paginate = options.paginate
   }
 
+  get Model () {
+    return this.options.Model
+  }
+  set Model (value: R) {
+    this.options.Model = value
+  }
+
   async init (opts = {}) {
     let r = this.options.Model
     let t = this.options.name
@@ -119,55 +128,145 @@ class Service<A> extends AdapterService<A> implements InternalServiceMethods {
       .run()
   }
 
-  createFilter (query: any) {
-    return createFilter(query, this.options.Model)
+  _multiOptions (id: Id, params: Params = {}) {
+    const { query } = this.filterQuery(params)
+    const options = Object.assign(
+      { multi: true },
+      params.rethinkdb || params.options
+    )
+
+    if (id !== null) {
+      options.multi = false
+      query.$and = (query.$and || []).concat({
+        [this.id]: id
+      })
+    }
+
+    return { query, options }
   }
 
+  /*filterQuery (q: any) {
+    return super.filterQuery(q || {}, {
+      operators: [...(this.options.whitelist || []), '$or']
+    })
+  }*/
+  /*
   createQuery (q: any) {
     let r = this.options.Model
 
-    const { filters, query } = filterQuery(q || {}, { operators: ['$or'] })
+    const { filters, query: feathersQuery } = this.filterQuery(q)
 
-    let rfilter: any
-    if (query.$or) {
-      const branches = filters.$or.map((b: any) => this.createFilter(b))
-      if (branches.length == 0) rfilter = {}
-      else rfilter = r.or(...(branches as [any, any]))
-    } else {
-      rfilter = this.createFilter(query)
-    }
-    let rq = this.table.filter(rfilter)
+    let query = this.table.filter(this.createFilter(feathersQuery))
 
     // Handle $select
     if (filters.$select) {
-      rq = rq.pluck(filters.$select) as any
+      query = query.pluck(filters.$select) as any
     }
 
     // Handle $sort
     if (filters.$sort) {
       _.each(filters.$sort, (order, fieldName) => {
         if (parseInt(order) === 1) {
-          rq = rq.orderBy(fieldName)
+          query = query.orderBy(fieldName)
         } else {
-          rq = rq.orderBy(r.desc(fieldName))
+          query = query.orderBy(r.desc(fieldName))
         }
       })
     }
 
-    return rq
+    return { filters, query }
+  }
+  */
+
+  parse (query: any): (doc: any) => RDatum<any> {
+    const r = this.options.Model
+    return doc => {
+      const or = query.$or
+      const and = query.$and
+      let matcher = r({})
+
+      // Handle $or. If it exists, use the first $or entry as the base matcher
+      if (Array.isArray(or)) {
+        matcher = this.parse(or[0])(doc)
+
+        for (let i = 0; i < or.length; i++) {
+          matcher = matcher.or(this.parse(or[i])(doc))
+        }
+        // Handle $and
+      } else if (Array.isArray(and)) {
+        matcher = this.parse(and[0])(doc)
+
+        for (let i = 0; i < and.length; i++) {
+          matcher = matcher.and(this.parse(and[i])(doc))
+        }
+      }
+
+      _.each(query, (value, field) => {
+        if (typeof value !== 'object') {
+          // Match value directly
+          matcher = matcher.and(buildNestedQueryPredicate(field, doc).eq(value))
+        } else {
+          // Handle special parameters
+          _.each(value, (selector, type) => {
+            let method
+            if (type === '$in') {
+              matcher = matcher.and(
+                r.expr(selector).contains(buildNestedQueryPredicate(field, doc))
+              )
+            } else if (type === '$nin') {
+              matcher = matcher.and(
+                r
+                  .expr(selector)
+                  .contains(buildNestedQueryPredicate(field, doc))
+                  .not()
+              )
+            } else if ((method = mappings[type])) {
+              const selectorArray = Array.isArray(selector)
+                ? selector
+                : [selector]
+
+              matcher = matcher.and(
+                buildNestedQueryPredicate(field, doc)[method](...selectorArray)
+              )
+            }
+          })
+        }
+      })
+
+      return matcher
+    }
   }
 
-  _find (params: Params & { rethinkdb?: RTable<A> } = {}) {
-    const paginate = params.paginate || this.paginate
+  _find (params: Params & { paginate: false }): Promise<A[]>
+  _find (params: Params & { paginate: true }): Promise<Paginated<A>>
+  _find (params: Params): Promise<A[] | Paginated<A>>
+  _find (params: Params) {
+    const { filters, query, paginate } = this.filterQuery(params)
     // Prepare the special query params.
-    const { filters } = filterQuery(params.query || {}, paginate)
 
-    let q = params.rethinkdb ?? this.createQuery(params.query)
+    let r = this.options.Model
+    let q = this.table.filter(this.parse(query))
+
+    // Handle $select
+    if (filters.$select) {
+      q = q.pluck(filters.$select) as any
+    }
+
+    // Handle $sort
+    if (filters.$sort) {
+      _.each(filters.$sort, (order, fieldName) => {
+        if (parseInt(order) === 1) {
+          q = q.orderBy(fieldName)
+        } else {
+          q = q.orderBy(r.desc(fieldName))
+        }
+      })
+    }
     let countQuery
 
     // For pagination, count has to run as a separate query, but without limit.
     if (paginate && paginate.default) {
-      countQuery = q.count().run()
+      countQuery = q.count()
     }
 
     // Handle $skip AFTER the count query but BEFORE $limit.
@@ -180,7 +279,7 @@ class Service<A> extends AdapterService<A> implements InternalServiceMethods {
     }
 
     // Execute the query
-    return Promise.all([q, countQuery]).then(([data, total]) => {
+    return Promise.all([q.run(), countQuery?.run()]).then(([data, total]) => {
       if (paginate && paginate.default) {
         return {
           total,
@@ -194,28 +293,36 @@ class Service<A> extends AdapterService<A> implements InternalServiceMethods {
     })
   }
 
-  _get (id: Id, params: Params & { query?: any } = {}) {
-    let query = this.table.filter(params.query).limit(1)
-
-    // If an id was passed, just get the record.
-    if (id !== null && id !== undefined) {
-      query = this.table.get(id) as any
-    }
-
-    if (params.query && params.query.$select) {
-      query = query.pluck(params.query.$select.concat(this.id)) as any
-    }
-
-    return query.run().then(data => {
-      const result = Array.isArray(data) ? data[0] : data
-      if (!result) {
-        throw new errors.NotFound(`No record found for id '${id}'`)
-      }
-      return result
-    })
+  _get (id: Id, params: Params & { query?: any }) {
+    const { query } = this.filterQuery(params)
+    const q = this.table.filter(doc =>
+      this.parse(query)(doc).and(doc(this.id).eq(id))
+    )
+    return q
+      .run()
+      .then(data => {
+        const result = Array.isArray(data) ? data[0] : data
+        if (!result) {
+          throw new errors.NotFound(`No record found for id '${id}'`)
+        }
+        return result
+      })
+      .then(select(params, this.id))
   }
 
-  _create (data: any, params: Params & { rethinkdb?: InsertOptions } = {}) {
+  async _findOrGet (id: Id, params = {}): Promise<A | A[]> {
+    if (id === null) {
+      return this._find(
+        _.extend({}, params, {
+          paginate: false
+        })
+      )
+    }
+
+    return this._get(id, params)
+  }
+
+  _create (data: any, params: Params & { rethinkdb?: InsertOptions }) {
     const idField = this.id
     return this.table
       .insert(data, params.rethinkdb)
@@ -250,34 +357,30 @@ class Service<A> extends AdapterService<A> implements InternalServiceMethods {
       .then(select(params, this.id))
   }
 
-  _patch (
-    id: Id,
-    data: any,
-    params: Params & { rethinkdb?: UpdateOptions } = {}
-  ) {
-    let query: any
-
-    if (id !== null && id !== undefined) {
-      query = this._get(id)
-    } else if (params) {
-      query = this._find({ ...params, rethinkdb: undefined })
-    } else {
+  _patch (id: Id, data: any, params: Params & { rethinkdb?: UpdateOptions }) {
+    let { query } = this._multiOptions(id, params)
+    if (id === undefined && !params) {
       return Promise.reject(new Error('Patch requires an ID or params'))
     }
 
     // Find the original record(s), first, then patch them.
-    return query
-      .then((getData: any) => {
-        let query
+    const docs = this._findOrGet(id, params)
+
+    return docs
+      .then((result: any) => {
+        let q
         let options = Object.assign({ returnChanges: true }, params.rethinkdb)
 
-        if (Array.isArray(getData)) {
-          query = this.table.getAll(...getData.map(item => item[this.id]))
+        if (Array.isArray(result)) {
+          if (id !== null && id !== undefined && !result.length) {
+            throw new errors.NotFound('Could not find document')
+          }
+          q = this.table.getAll(...result.map(item => item[this.id]))
         } else {
-          query = this.table.get(id)
+          q = this.table.get(id)
         }
 
-        return query
+        return q
           .update(data, options)
           .run()
           .then(response => {
@@ -288,7 +391,7 @@ class Service<A> extends AdapterService<A> implements InternalServiceMethods {
       .then(select(params, this.id))
   }
 
-  _update (id: Id, data: any, params: { rethinkdb?: UpdateOptions } = {}) {
+  _update (id: Id, data: any, params: { rethinkdb?: UpdateOptions }) {
     let options = Object.assign({ returnChanges: true }, params.rethinkdb)
 
     if (Array.isArray(data) || id === null) {
@@ -315,22 +418,21 @@ class Service<A> extends AdapterService<A> implements InternalServiceMethods {
       .then(select(params, this.id))
   }
 
-  _remove (id: string, params: Params & { rethinkdb?: DeleteOptions } = {}) {
-    let query
+  _remove (id: string, params: Params & { rethinkdb?: DeleteOptions }) {
+    let { query } = this._multiOptions(id, params)
+
     let options = Object.assign({ returnChanges: true }, params.rethinkdb)
 
-    // You have to pass id=null to remove all records.
-    if (id !== null && id !== undefined) {
-      query = this.table.get(id)
-    } else if (id === null) {
-      query = this.createQuery(params.query)
-    } else {
+    if (id === undefined) {
       return Promise.reject(
-        new Error('You must pass either an id or params to remove.')
+        new Error(
+          'You must pass either an id or params to remove. You have to pass id=null to remove all records.'
+        )
       )
     }
+    const docs = this.table.filter(this.parse(query))
 
-    return query
+    return docs
       .delete(options)
       .run()
       .then(res => {
@@ -338,6 +440,9 @@ class Service<A> extends AdapterService<A> implements InternalServiceMethods {
           let changes = res.changes.map(change => change.old_val)
           return changes.length === 1 ? changes[0] : changes
         } else {
+          if (id !== null && id !== undefined) {
+            throw new errors.NotFound('Could not find document to remove')
+          }
           return []
         }
       })
@@ -422,6 +527,28 @@ class Service<A> extends AdapterService<A> implements InternalServiceMethods {
 
     rethinkInit.then(() => this.watchChangefeeds(app))
   }
+}
+
+// Special parameter to RQL condition
+const mappings: { [key: string]: string | undefined } = {
+  $search: 'match',
+  $contains: 'contains',
+  $lt: 'lt',
+  $lte: 'le',
+  $gt: 'gt',
+  $gte: 'ge',
+  $ne: 'ne',
+  $eq: 'eq'
+}
+function buildNestedQueryPredicate (field: string, doc: any) {
+  var fields = field.split('.')
+  var searchFunction = doc(fields[0])
+
+  for (var i = 1; i < fields.length; i++) {
+    searchFunction = searchFunction(fields[i])
+  }
+
+  return searchFunction
 }
 
 module.exports = function (options: Options) {
