@@ -1,6 +1,6 @@
 # feathers-rethinkdb
 
-> __Unmaintained:__ This project is no longer maintained
+> __WORK IN PROGRESS__ This is a fork of the feathers-rethinkdb project, which is no longer maintained. This code is a WIP upgrade to the latest Feathers db adapter standards. It already passes the common db tests. If interested, contact @cie.
 
 [![Greenkeeper badge](https://badges.greenkeeper.io/feathersjs-ecosystem/feathers-rethinkdb.svg)](https://greenkeeper.io/)
 
