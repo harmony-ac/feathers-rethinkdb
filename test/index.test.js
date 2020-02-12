@@ -1,11 +1,12 @@
-const chai = require('chai')
-const uberproto = require('uberproto')
-const adapterTests = require('@feathersjs/adapter-tests')
+const chai = require('chai');
+const uberproto = require('uberproto');
+const adapterTests = require('@feathersjs/adapter-tests');
 
-const feathers = require('@feathersjs/feathers')
-const errors = require('@feathersjs/errors')
-const rethink = require('rethinkdbdash')
-const service = require('../lib')
+const feathers = require('@feathersjs/feathers');
+const errors = require('@feathersjs/errors');
+const rethink = require('rethinkdbdash');
+const rethinkdbTs = require('rethinkdb-ts');
+const service = require('../lib');
 const testSuite = adapterTests([
   '.options',
   '.events',
@@ -69,234 +70,244 @@ const testSuite = adapterTests([
   '.remove + id + query id',
   '.update + id + query id',
   '.patch + id + query id'
-])
+]);
 
-const r = rethink({
-  db: 'feathers'
-})
+rethinkdbTs.r.connectPool({ db: 'feathers' });
+const drivers = {
+  rethinkdbdash: rethink({ db: 'feathers' }),
+  'rethinkdb-ts': rethinkdbTs.r
+};
 
-// RethinkDB: if no other sort order is given. This means that items can not be returned in the
-// same order they have been created so this counter is used for sorting instead.
-let counter = 0
+for (const [driverName, r] of Object.entries(drivers)) {
+  describe(`with ${driverName}`, () => {
+    // RethinkDB: if no other sort order is given. This means that items can not be returned in the
+    // same order they have been created so this counter is used for sorting instead.
+    let counter = 0;
 
-const expect = chai.expect
-const numberService = {
-  _find (params) {
-    params = params || {}
-    params.query = params.query || {}
-    if (!params.query.$sort) {
-      params.query.$sort = {
-        counter: 1
+    const expect = chai.expect;
+    const numberService = {
+      _find (params) {
+        params = params || {};
+        params.query = params.query || {};
+        if (!params.query.$sort) {
+          params.query.$sort = {
+            counter: 1
+          };
+        }
+
+        return this._super(params);
+      },
+
+      create (data, params) {
+        const addCount = current =>
+          Object.assign({}, current, {
+            counter: ++counter
+          });
+
+        if (Array.isArray(data)) {
+          data = data.map(addCount);
+        } else {
+          data = addCount(data);
+        }
+
+        return this._super(data, params);
       }
-    }
+    };
 
-    return this._super(params)
-  },
-
-  create (data, params) {
-    const addCount = current =>
-      Object.assign({}, current, {
-        counter: ++counter
-      })
-
-    if (Array.isArray(data)) {
-      data = data.map(addCount)
-    } else {
-      data = addCount(data)
-    }
-
-    return this._super(data, params)
-  }
-}
-
-const app = feathers()
-  .use(
-    '/people',
-    uberproto.extend(
-      service({
-        Model: r,
-        db: 'feathers',
-        name: 'people',
-        watch: true,
-        events: ['testing']
-      }),
-      numberService
-    )
-  )
-  .use(
-    '/people-customid',
-    uberproto.extend(
-      service({
-        id: 'customid',
-        Model: r,
-        db: 'feathers',
-        name: 'people_customid',
-        watch: true,
-        events: ['testing']
-      }),
-      numberService
-    )
-  )
-const people = app.service('people')
-
-people.hooks({
-  after (hook) {
-    hook.result.test = 'testing'
-  }
-})
-
-describe('feathers-rethinkdb', () => {
-  before(() => {
-    return r
-      .dbList()
-      .contains('feathers') // create db if not exists
-      .do(dbExists =>
-        r.branch(dbExists, { created: 0 }, r.dbCreate('feathers'))
+    const app = feathers()
+      .use(
+        '/people',
+        uberproto.extend(
+          service({
+            Model: r,
+            db: 'feathers',
+            name: 'people',
+            watch: true,
+            events: ['testing']
+          }),
+          numberService
+        )
       )
-      .run()
-      .then(() =>
-        Promise.all([
-          app.service('people').init(),
-          app.service('people-customid').init({
-            primaryKey: 'customid'
+      .use(
+        '/people-customid',
+        uberproto.extend(
+          service({
+            id: 'customid',
+            Model: r,
+            db: 'feathers',
+            name: 'people_customid',
+            watch: true,
+            events: ['testing']
+          }),
+          numberService
+        )
+      );
+    const people = app.service('people');
+
+    people.hooks({
+      after (hook) {
+        hook.result.test = 'testing';
+      }
+    });
+
+    describe('feathers-rethinkdb', () => {
+      before(() => {
+        return r
+          .dbList()
+          .contains('feathers') // create db if not exists
+          .do(dbExists =>
+            r.branch(dbExists, { created: 0 }, r.dbCreate('feathers'))
+          )
+          .run()
+          .then(() =>
+            Promise.all([
+              app.service('people').init(),
+              app.service('people-customid').init({
+                primaryKey: 'customid'
+              })
+            ])
+          )
+          .then(() => app.setup());
+      });
+
+      after(() => {
+        return Promise.all([
+          r
+            .table('people')
+            .delete()
+            .run(),
+          r
+            .table('people_customid')
+            .delete()
+            .run()
+        ]);
+      });
+
+      it('is CommonJS compatible', () => {
+        expect(typeof require('../lib')).to.equal('function');
+      });
+
+      it('after hooks run and get send with events', done => {
+        const name = 'Hooks tester';
+        const service = app.service('people');
+
+        service.once('created', person => {
+          try {
+            expect(person.test).to.equal('testing', 'Hook property got set');
+          } catch (e) {
+            done(e);
+          }
+        });
+
+        service.once('removed', person => {
+          try {
+            expect(person.test).to.equal('testing', 'Hook property got set');
+            done();
+          } catch (e) {
+            done(e);
+          }
+        });
+
+        service
+          .create({
+            name,
+            age: 1
           })
-        ])
-      )
-      .then(() => app.setup())
-  })
+          .then(person => service.remove(person.id));
+      });
 
-  after(() => {
-    return Promise.all([
-      r.table('people').delete(null, {}),
-      r.table('people_customid').delete(null, {})
-    ])
-  })
+      describe('common tests', () => {
+        testSuite(app, errors, 'people');
+        testSuite(app, errors, 'people-customid', 'customid');
+      });
 
-  it('is CommonJS compatible', () => {
-    expect(typeof require('../lib')).to.equal('function')
-  })
+      describe('Changefeeds', () => {
+        it('`created` and `removed`', done => {
+          const table = r.db('feathers').table('people');
 
-  it('after hooks run and get send with events', done => {
-    const name = 'Hooks tester'
-    const service = app.service('people')
+          people.once('created', person => {
+            expect(person.name).to.equal('Marshall Thompson');
+            expect(person.counter).to.equal(counter);
+            table
+              .get(person.id)
+              .delete()
+              .run();
+          });
 
-    service.once('created', person => {
-      try {
-        expect(person.test).to.equal('testing', 'Hook property got set')
-      } catch (e) {
-        done(e)
-      }
-    })
+          people.once('removed', person => {
+            expect(person.name).to.equal('Marshall Thompson');
+            done();
+          });
 
-    service.once('removed', person => {
-      try {
-        expect(person.test).to.equal('testing', 'Hook property got set')
-        done()
-      } catch (e) {
-        done(e)
-      }
-    })
+          table
+            .insert({
+              name: 'Marshall Thompson',
+              counter: ++counter
+            })
+            .run();
+        });
 
-    service
-      .create({
-        name,
-        age: 1
-      })
-      .then(person => service.remove(person.id))
-  })
+        it('`patched` and `updated`', done => {
+          const table = r.db('feathers').table('people');
 
-  describe('common tests', () => {
-    testSuite(app, errors, 'people')
-    testSuite(app, errors, 'people-customid', 'customid')
-  })
+          people.once('created', person => {
+            expect(person.name).to.equal('Marshall Thompson');
+            person.name = 'Marshall T.';
+            table
+              .get(person.id)
+              .replace(person)
+              .run();
+          });
 
-  describe('Changefeeds', () => {
-    it('`created` and `removed`', done => {
-      const table = r.db('feathers').table('people')
+          people.once('patched', person =>
+            expect(person.name).to.equal('Marshall T.')
+          );
 
-      people.once('created', person => {
-        expect(person.name).to.equal('Marshall Thompson')
-        expect(person.counter).to.equal(counter)
-        table
-          .get(person.id)
-          .delete()
-          .run()
-      })
+          people.once('updated', person => {
+            expect(person.name).to.equal('Marshall T.');
+            table
+              .get(person.id)
+              .delete()
+              .run();
+          });
 
-      people.once('removed', person => {
-        expect(person.name).to.equal('Marshall Thompson')
-        done()
-      })
+          people.once('removed', () => done());
 
-      table
-        .insert({
-          name: 'Marshall Thompson',
-          counter: ++counter
-        })
-        .run()
-    })
+          table
+            .insert({
+              name: 'Marshall Thompson',
+              counter: ++counter
+            })
+            .run();
+        });
+      });
 
-    it('`patched` and `updated`', done => {
-      const table = r.db('feathers').table('people')
+      describe('creates', () => {
+        it('create works with an array', () => {
+          return people
+            .create([{ name: 'Test 1' }, { name: 'Test 2' }])
+            .then(data => {
+              expect(typeof data[0].id).to.not.equal('undefined');
+              expect(typeof data[1].id).to.not.equal('undefined');
+            });
+        });
 
-      people.once('created', person => {
-        expect(person.name).to.equal('Marshall Thompson')
-        person.name = 'Marshall T.'
-        table
-          .get(person.id)
-          .replace(person)
-          .run()
-      })
+        it('create allows upsert with params.rethinkdb options', () => {
+          return people
+            .create({ name: 'Testing upser' })
+            .then(result => {
+              const rethinkdb = { conflict: 'update' };
 
-      people.once('patched', person =>
-        expect(person.name).to.equal('Marshall T.')
-      )
+              result.name = 'Testing upsert';
 
-      people.once('updated', person => {
-        expect(person.name).to.equal('Marshall T.')
-        table
-          .get(person.id)
-          .delete()
-          .run()
-      })
+              return people.create(result, { rethinkdb });
+            })
+            .then(result => expect(result.name).to.equal('Testing upsert'));
+        });
+      });
 
-      people.once('removed', () => done())
-
-      table
-        .insert({
-          name: 'Marshall Thompson',
-          counter: ++counter
-        })
-        .run()
-    })
-  })
-
-  describe('creates', () => {
-    it('create works with an array', () => {
-      return people
-        .create([{ name: 'Test 1' }, { name: 'Test 2' }])
-        .then(data => {
-          expect(typeof data[0].id).to.not.equal('undefined')
-          expect(typeof data[1].id).to.not.equal('undefined')
-        })
-    })
-
-    it('create allows upsert with params.rethinkdb options', () => {
-      return people
-        .create({ name: 'Testing upser' })
-        .then(result => {
-          const rethinkdb = { conflict: 'update' }
-
-          result.name = 'Testing upsert'
-
-          return people.create(result, { rethinkdb })
-        })
-        .then(result => expect(result.name).to.equal('Testing upsert'))
-    })
-  })
-
-  describe('additional query parameters', () => {
-    /*
+      describe('additional query parameters', () => {
+        /*
     it('$search', () => {
       return people
         .create([
@@ -331,7 +342,7 @@ describe('feathers-rethinkdb', () => {
         })
     })
     */
-    /*
+        /*
     it('$contains', () => {
       return people
         .create([
@@ -374,7 +385,7 @@ describe('feathers-rethinkdb', () => {
         })
     })
     */
-    /*
+        /*
     it('$and', () => {
       return people
         .create([
@@ -435,21 +446,27 @@ describe('feathers-rethinkdb', () => {
         });
     });
     */
-  })
-})
+      });
+    });
 
-describe('init database', () => {
-  it('service.init() initializes the database', () => {
-    return service({ Model: r, name: 'testTable', db: 'feathers' })
-      .init()
-      .then(() => {
-        expect(r.tableList().contains('testTable'))
-        r.table('testTable')
-          .delete(null)
-          .run()
-      })
-  })
-})
+    describe('init database', () => {
+      it('service.init() initializes the database', async () => {
+        const s = service({ Model: r, name: 'testTable', db: 'feathers' });
+        await s.init();
+        expect(
+          await r
+            .tableList()
+            .contains('testTable')
+            .run()
+        ).to.equal(true);
+        return r
+          .table('testTable')
+          .delete()
+          .run();
+      });
+    });
+  });
+}
 
 /* describe('find within nested document', () => {
   it('$search', () => {

@@ -325,7 +325,7 @@ class Service<A> extends AdapterService<A> implements InternalServiceMethods {
   _create (data: any, params: Params & { rethinkdb?: InsertOptions }) {
     const idField = this.id
     return this.table
-      .insert(data, params.rethinkdb)
+      .insert(data, ...(params.rethinkdb ? [params.rethinkdb] : []))
       .run()
       .then(res => {
         if (data[idField]) {
@@ -421,7 +421,7 @@ class Service<A> extends AdapterService<A> implements InternalServiceMethods {
   _remove (id: string, params: Params & { rethinkdb?: DeleteOptions }) {
     let { query } = this._multiOptions(id, params)
 
-    let options = Object.assign({ returnChanges: true }, params.rethinkdb)
+    let options = Object.assign({ returnChanges: true }, params.rethinkdb ?? {})
 
     if (id === undefined) {
       return Promise.reject(
