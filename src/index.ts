@@ -10,7 +10,8 @@ import {
   RCursor,
   Changes,
   RSelection,
-  RSingleSelection
+  RSingleSelection,
+  TableCreateOptions
 } from 'rethinkdb-ts/lib/types'
 import {
   Id,
@@ -20,7 +21,8 @@ import {
   PaginationOptions,
   Query,
   Application,
-  Paginated
+  Paginated,
+  SetupMethod
 } from '@feathersjs/feathers'
 import { _, hooks } from '@feathersjs/commons'
 import {
@@ -50,10 +52,12 @@ interface Options extends ServiceOptions {
   watch?: boolean
   events: string[]
   paginate: false | PaginationOptions
+  tableCreateOptions?: TableCreateOptions
 }
 
 // Create the service.
-class Service<A> extends AdapterService<A> implements InternalServiceMethods {
+class Service<A> extends AdapterService<A>
+  implements InternalServiceMethods, SetupMethod {
   type: 'rethinkdb'
   table: RTable<A>
   watch: boolean
@@ -104,28 +108,6 @@ class Service<A> extends AdapterService<A> implements InternalServiceMethods {
   }
   set Model (value: R) {
     this.options.Model = value
-  }
-
-  async init (opts = {}) {
-    let r = this.options.Model
-    let t = this.options.name
-    let db = this.options.db
-
-    await r
-      .dbList()
-      .contains(db) // create db if not exists
-      .do((dbExists: RValue<boolean>) =>
-        r.branch(dbExists, { created: 0 }, r.dbCreate(db))
-      )
-      .run()
-    return r
-      .db(db)
-      .tableList()
-      .contains(t) // create table if not exists
-      .do((tableExists: RValue<boolean>) =>
-        r.branch(tableExists, { created: 0 }, r.db(db).tableCreate(t, opts))
-      )
-      .run()
   }
 
   _multiOptions (id: Id, params: Params = {}) {
@@ -522,10 +504,34 @@ class Service<A> extends AdapterService<A> implements InternalServiceMethods {
     return this._cursor
   }
 
-  setup (this: Service<A> & EventEmitter, app: Application) {
-    const rethinkInit = app.get('rethinkInit') || Promise.resolve()
+  async setup (this: Service<A> & EventEmitter, app: Application) {
+    await app.get('rethinkInit')
 
-    rethinkInit.then(() => this.watchChangefeeds(app))
+    let r = this.options.Model
+    let t = this.options.name
+    let db = this.options.db
+    const opts = this.options.tableCreateOptions
+
+    await r
+      .dbList()
+      .contains(db) // create db if not exists
+      .do((dbExists: RValue<boolean>) =>
+        r.branch(dbExists, { created: 0 }, r.dbCreate(db))
+      )
+      .run()
+    await r
+      .db(db)
+      .tableList()
+      .contains(t) // create table if not exists
+      .do((tableExists: RValue<boolean>) =>
+        r.branch(
+          tableExists,
+          { created: 0 },
+          r.db(db).tableCreate(t, ...(opts ? [opts] : []))
+        )
+      )
+      .run()
+    this.watchChangefeeds(app)
   }
 }
 
