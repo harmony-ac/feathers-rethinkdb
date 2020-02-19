@@ -512,7 +512,6 @@ class Service<A> extends AdapterService<A>
     let db = this.options.db
     const opts = this.options.tableCreateOptions
 
-    await r.connectPool(app.get('rethinkdb'))
     await r
       .dbList()
       .contains(db) // create db if not exists
