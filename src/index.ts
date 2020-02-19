@@ -555,7 +555,7 @@ function buildNestedQueryPredicate (field: string, doc: any) {
   return searchFunction
 }
 
-export default function (options: Options) {
+export default function (options: Partial<Options>) {
   return new Service(options)
 }
 

@@ -56,5 +56,5 @@ declare class Service<A> extends AdapterService<A> implements InternalServiceMet
     watchChangefeeds(this: Service<A> & EventEmitter, app: Application): any;
     setup(this: Service<A> & EventEmitter, app: Application): Promise<void>;
 }
-export default function (options: Options): Service<unknown>;
+export default function (options: Partial<Options>): Service<unknown>;
 export { Service };
