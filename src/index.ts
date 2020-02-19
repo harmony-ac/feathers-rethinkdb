@@ -45,7 +45,7 @@ interface Params extends DefaultParams {
 const { processHooks, getHooks, createHookObject } = hooks
 const BASE_EVENTS = ['created', 'updated', 'patched', 'removed']
 
-export interface Options extends ServiceOptions {
+interface Options extends ServiceOptions {
   Model: R
   db: string
   name: string
@@ -64,7 +64,7 @@ class Service<A> extends AdapterService<A>
   options: Options
   paginate: false | PaginationOptions
   _cursor: any
-  constructor (options: Options) {
+  constructor (options: Partial<Options>) {
     if (!options) {
       throw new Error('RethinkDB options have to be provided.')
     }
@@ -84,23 +84,21 @@ class Service<A> extends AdapterService<A>
       options.events = BASE_EVENTS.concat(options.events ?? [])
     }
     super({ id: '_id', ...options })
-    this.options = Object.assign(
-      // we need to do this again, just for correct typings
-      {
-        id: 'id',
-        events: [],
-        paginate: {},
-        multi: false,
-        filters: [],
-        whitelist: []
-      },
-      options
-    )
+    // we need to do this again, just for correct typings
+    this.options = {
+      id: 'id',
+      events: [],
+      paginate: false,
+      multi: false,
+      filters: [],
+      whitelist: [],
+      ...options
+    } as Options
 
     this.type = 'rethinkdb'
     this.table = options.Model.db(options.db).table(options.name)
     this.watch = options.watch ?? true
-    this.paginate = options.paginate
+    this.paginate = options.paginate ?? false
   }
 
   get Model () {

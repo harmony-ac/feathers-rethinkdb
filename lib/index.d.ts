@@ -6,7 +6,7 @@ import { EventEmitter } from 'events';
 interface Params extends DefaultParams {
     paginate?: false | PaginationOptions;
 }
-export interface Options extends ServiceOptions {
+interface Options extends ServiceOptions {
     Model: R;
     db: string;
     name: string;
@@ -22,7 +22,7 @@ declare class Service<A> extends AdapterService<A> implements InternalServiceMet
     options: Options;
     paginate: false | PaginationOptions;
     _cursor: any;
-    constructor(options: Options);
+    constructor(options: Partial<Options>);
     get Model(): R;
     set Model(value: R);
     _multiOptions(id: Id, params?: Params): {
