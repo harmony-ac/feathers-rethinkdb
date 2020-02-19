@@ -45,7 +45,7 @@ interface Params extends DefaultParams {
 const { processHooks, getHooks, createHookObject } = hooks
 const BASE_EVENTS = ['created', 'updated', 'patched', 'removed']
 
-interface Options extends ServiceOptions {
+export interface Options extends ServiceOptions {
   Model: R
   db: string
   name: string
@@ -558,8 +558,8 @@ function buildNestedQueryPredicate (field: string, doc: any) {
   return searchFunction
 }
 
-module.exports = function (options: Options) {
+export default function (options: Options) {
   return new Service(options)
 }
 
-module.exports.Service = Service
+export { Service }
